@@ -95,25 +95,38 @@ namespace Utf8Json.Formatters
             }
             else
             {
-                var keyFormatter = formatterResolver.GetFormatterWithVerify<TKey>() as IObjectPropertyNameFormatter<TKey>;
-                if (keyFormatter == null) throw new InvalidOperationException(typeof(TKey) + " does not support dictionary key deserialize.");
                 var valueFormatter = formatterResolver.GetFormatterWithVerify<TValue>();
 
                 reader.ReadIsBeginObjectWithVerify();
-
                 var dict = Create();
                 var i = 0;
                 while (!reader.ReadIsEndObjectWithSkipValueSeparator(ref i))
                 {
-                    var key = keyFormatter.DeserializeFromPropertyName(ref reader, formatterResolver);
-                    reader.ReadIsNameSeparatorWithVerify();
+                    TKey key;
+                    if (typeof(TKey) == typeof(string))
+                    {
+                        // For string keys, use ReadPropertyName().
+                        // In this implementation, ReadPropertyName() consumes both the key and the colon.
+                        key = (TKey)(object)reader.ReadPropertyName();
+                        // DO NOT call reader.ReadIsNameSeparatorWithVerify() here.
+                    }
+                    else
+                    {
+                        // For non-string keys, use the registered formatter.
+                        var keyFormatter = formatterResolver.GetFormatterWithVerify<TKey>() as IObjectPropertyNameFormatter<TKey>;
+                        if (keyFormatter == null)
+                            throw new InvalidOperationException(typeof(TKey) + " does not support dictionary key deserialize.");
+                        key = keyFormatter.DeserializeFromPropertyName(ref reader, formatterResolver);
+                        // Explicitly consume the colon for non-string keys.
+                        reader.ReadIsNameSeparatorWithVerify();
+                    }
                     var value = valueFormatter.Deserialize(ref reader, formatterResolver);
                     Add(ref dict, i - 1, key, value);
                 }
-
                 return Complete(ref dict);
             }
         }
+
 
         // abstraction for serialize
 

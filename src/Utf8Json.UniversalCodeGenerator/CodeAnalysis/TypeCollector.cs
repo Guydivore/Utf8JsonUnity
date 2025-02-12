@@ -339,6 +339,12 @@ namespace Utf8Json.UniversalCodeGenerator
                 foreach (var item in type.TypeArguments)
                 {
                     CollectCore(item);
+
+                    // Check if the type argument is an enum and collect it
+                    if (item.TypeKind == TypeKind.Enum)
+                    {
+                        CollectEnum(item as INamedTypeSymbol);
+                    }
                 }
 
                 var typeArgs = string.Join(", ", type.TypeArguments.Select(x => x.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)));
@@ -378,6 +384,27 @@ namespace Utf8Json.UniversalCodeGenerator
                     collectedGenericInfo.Add(enumerableInfo);
                 }
             }
+        }
+
+        void CollectEnum(INamedTypeSymbol enumType)
+        {
+            if (!alreadyCollected.Add(enumType))
+            {
+                return;
+            }
+
+            var info = new ObjectSerializationInfo
+            {
+                IsClass = false,
+                ConstructorParameters = Array.Empty<MemberSerializationInfo>(),
+                Members = Array.Empty<MemberSerializationInfo>(),
+                Name = enumType.ToDisplayString(shortTypeNameFormat).Replace(".", "_"),
+                FullName = enumType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                Namespace = enumType.ContainingNamespace.IsGlobalNamespace ? null : enumType.ContainingNamespace.ToDisplayString(),
+                HasConstructor = false
+            };
+
+            collectedObjectInfo.Add(info);
         }
 
         void CollectObject(INamedTypeSymbol type)

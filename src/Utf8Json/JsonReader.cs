@@ -45,10 +45,11 @@ namespace Utf8Json
         {
             var actual = ((char)bytes[offset]).ToString();
             var pos = offset;
+            JsonToken token = JsonToken.None;
 
             try
             {
-                var token = GetCurrentJsonToken();
+                token = GetCurrentJsonToken();
                 switch (token)
                 {
                     case JsonToken.Number:
@@ -73,7 +74,7 @@ namespace Utf8Json
             }
             catch { }
 
-            return new JsonParsingException("expected:'" + expected + "', actual:'" + actual + "', at offset:" + pos, bytes, pos, offset, actual);
+            return new JsonParsingException("ForToken: " + token + ", expected:'" + expected + "', actual:'" + actual + "', at offset:" + pos, bytes, pos, offset, actual);
         }
 
         JsonParsingException CreateParsingExceptionMessage(string message)
@@ -550,146 +551,159 @@ namespace Utf8Json
 
         void ReadStringSegmentCore(out byte[] resultBytes, out int resultOffset, out int resultLength)
         {
-            // SkipWhiteSpace is already called from IsNull
+            // We assume SkipWhiteSpace() has already been called and that the current token is a string.
+            if (bytes[offset] != '\"')
+                throw CreateParsingException("String Begin Token");
+            offset++; // skip the opening quote
 
+            int from = offset; // mark the beginning of the string content
+            int builderOffset = 0;
             byte[] builder = null;
-            var builderOffset = 0;
             char[] codePointStringBuffer = null;
-            var codePointStringOffet = 0;
+            int codePointStringOffset = 0;
 
-            if (bytes[offset] != '\"') throw CreateParsingException("String Begin Token");
-            offset++;
-
-            var from = offset;
-
-            // eliminate array-bound check
-            for (int i = offset; i < bytes.Length; i++)
+            while (offset < bytes.Length)
             {
-                byte escapeCharacter = 0;
-                switch (bytes[i])
+                byte current = bytes[offset];
+                if (current == (byte)'\"') // closing quote found
                 {
-                    case (byte)'\\': // escape character
-                        switch ((char)bytes[i + 1])
-                        {
-                            case '"':
-                            case '\\':
-                            case '/':
-                                escapeCharacter = bytes[i + 1];
-                                goto COPY;
-                            case 'b':
-                                escapeCharacter = (byte)'\b';
-                                goto COPY;
-                            case 'f':
-                                escapeCharacter = (byte)'\f';
-                                goto COPY;
-                            case 'n':
-                                escapeCharacter = (byte)'\n';
-                                goto COPY;
-                            case 'r':
-                                escapeCharacter = (byte)'\r';
-                                goto COPY;
-                            case 't':
-                                escapeCharacter = (byte)'\t';
-                                goto COPY;
-                            case 'u':
-                                if (codePointStringBuffer == null) codePointStringBuffer = StringBuilderCache.GetCodePointStringBuffer();
-
-                                if (codePointStringOffet == 0)
-                                {
-                                    if (builder == null) builder = StringBuilderCache.GetBuffer();
-
-                                    var copyCount = i - from;
-                                    BinaryUtil.EnsureCapacity(ref builder, builderOffset, copyCount + 1); // require + 1
-                                    Buffer.BlockCopy(bytes, from, builder, builderOffset, copyCount);
-                                    builderOffset += copyCount;
-                                }
-
-                                if (codePointStringBuffer.Length == codePointStringOffet)
-                                {
-                                    Array.Resize(ref codePointStringBuffer, codePointStringBuffer.Length * 2);
-                                }
-
-                                var a = (char)bytes[i + 2];
-                                var b = (char)bytes[i + 3];
-                                var c = (char)bytes[i + 4];
-                                var d = (char)bytes[i + 5];
-                                var codepoint = GetCodePoint(a, b, c, d);
-                                codePointStringBuffer[codePointStringOffet++] = (char)codepoint;
-                                i += 5;
-                                offset += 6;
-                                from = offset;
-                                continue;
-                            default:
-                                throw CreateParsingExceptionMessage("Bad JSON escape.");
-                        }
-                    case (byte)'"': // endtoken
-                        offset++;
-                        goto END;
-                    default: // string
-                        if (codePointStringOffet != 0)
-                        {
-                            if (builder == null) builder = StringBuilderCache.GetBuffer();
-                            BinaryUtil.EnsureCapacity(ref builder, builderOffset, StringEncoding.UTF8.GetMaxByteCount(codePointStringOffet));
-                            builderOffset += StringEncoding.UTF8.GetBytes(codePointStringBuffer, 0, codePointStringOffet, builder, builderOffset);
-                            codePointStringOffet = 0;
-                        }
-                        offset++;
-                        continue;
+                    offset++; // consume the closing quote
+                    goto END;
                 }
-
-                COPY:
+                else if (current == (byte)'\\') // escape sequence encountered
                 {
-                    if (builder == null) builder = StringBuilderCache.GetBuffer();
-                    if (codePointStringOffet != 0)
+                    // Ensure there is at least one more character.
+                    if (offset + 1 >= bytes.Length)
+                        throw CreateParsingException("Unexpected end of string after escape");
+
+                    char nextChar = (char)bytes[offset + 1];
+                    byte escapeCharacter = 0;
+                    if (nextChar == '"' || nextChar == '\\' || nextChar == '/')
                     {
-                        BinaryUtil.EnsureCapacity(ref builder, builderOffset, StringEncoding.UTF8.GetMaxByteCount(codePointStringOffet));
-                        builderOffset += StringEncoding.UTF8.GetBytes(codePointStringBuffer, 0, codePointStringOffet, builder, builderOffset);
-                        codePointStringOffet = 0;
+                        escapeCharacter = (byte)nextChar;
+                    }
+                    else if (nextChar == 'b')
+                    {
+                        escapeCharacter = (byte)'\b';
+                    }
+                    else if (nextChar == 'f')
+                    {
+                        escapeCharacter = (byte)'\f';
+                    }
+                    else if (nextChar == 'n')
+                    {
+                        escapeCharacter = (byte)'\n';
+                    }
+                    else if (nextChar == 'r')
+                    {
+                        escapeCharacter = (byte)'\r';
+                    }
+                    else if (nextChar == 't')
+                    {
+                        escapeCharacter = (byte)'\t';
+                    }
+                    else if (nextChar == 'u')
+                    {
+                        // Unicode escape sequence \uXXXX
+                        if (offset + 5 >= bytes.Length)
+                            throw CreateParsingException("Incomplete unicode escape sequence");
+
+                        if (codePointStringBuffer == null)
+                            codePointStringBuffer = StringBuilderCache.GetCodePointStringBuffer();
+
+                        // Flush any literal bytes that have been accumulated so far.
+                        if (codePointStringOffset == 0)
+                        {
+                            if (builder == null)
+                                builder = StringBuilderCache.GetBuffer();
+
+                            int copyCount = offset - from;
+                            BinaryUtil.EnsureCapacity(ref builder, builderOffset, copyCount + 1);
+                            Buffer.BlockCopy(bytes, from, builder, builderOffset, copyCount);
+                            builderOffset += copyCount;
+                        }
+
+                        if (codePointStringBuffer.Length == codePointStringOffset)
+                            Array.Resize(ref codePointStringBuffer, codePointStringBuffer.Length * 2);
+
+                        char a = (char)bytes[offset + 2];
+                        char b = (char)bytes[offset + 3];
+                        char c = (char)bytes[offset + 4];
+                        char d = (char)bytes[offset + 5];
+                        int codepoint = GetCodePoint(a, b, c, d);
+                        codePointStringBuffer[codePointStringOffset++] = (char)codepoint;
+                        offset += 6; // advance past "\uXXXX"
+                        from = offset;
+                        continue;
+                    }
+                    else
+                    {
+                        throw CreateParsingExceptionMessage("Bad JSON escape.");
                     }
 
-                    var copyCount = i - from;
-                    BinaryUtil.EnsureCapacity(ref builder, builderOffset, copyCount + 1); // require + 1!
-                    Buffer.BlockCopy(bytes, from, builder, builderOffset, copyCount);
-                    builderOffset += copyCount;
+                    // Flush any pending Unicode escapes.
+                    if (codePointStringOffset != 0)
+                    {
+                        if (builder == null)
+                            builder = StringBuilderCache.GetBuffer();
+
+                        BinaryUtil.EnsureCapacity(ref builder, builderOffset, StringEncoding.UTF8.GetMaxByteCount(codePointStringOffset));
+                        builderOffset += StringEncoding.UTF8.GetBytes(codePointStringBuffer, 0, codePointStringOffset, builder, builderOffset);
+                        codePointStringOffset = 0;
+                    }
+
+                    // Copy the literal portion preceding the escape.
+                    if (builder == null)
+                        builder = StringBuilderCache.GetBuffer();
+
+                    int literalCount = offset - from;
+                    BinaryUtil.EnsureCapacity(ref builder, builderOffset, literalCount + 1);
+                    Buffer.BlockCopy(bytes, from, builder, builderOffset, literalCount);
+                    builderOffset += literalCount;
                     builder[builderOffset++] = escapeCharacter;
-                    i += 1;
-                    offset += 2;
+                    offset += 2; // skip the '\' and the escaped character
                     from = offset;
+                }
+                else
+                {
+                    // Regular character, just move forward.
+                    offset++;
                 }
             }
 
-            resultLength = 0;
-            resultBytes = null;
-            resultOffset = 0;
+            // If we exit the loop without finding a closing quote, it's an error.
             throw CreateParsingException("String End Token");
 
-            END:
-            if (builderOffset == 0 && codePointStringOffet == 0) // no escape
+        END:
+            // If no escapes were encountered, return the original bytes slice.
+            if (builder == null && codePointStringOffset == 0)
             {
                 resultBytes = bytes;
-                resultOffset = from;
-                resultLength = offset - 1 - from; // skip last quote
+                resultOffset = from; // "from" was last set when entering the string content
+                resultLength = offset - 1 - from; // subtract one to exclude the closing quote
             }
             else
             {
-                if (builder == null) builder = StringBuilderCache.GetBuffer();
-                if (codePointStringOffet != 0)
-                {
-                    BinaryUtil.EnsureCapacity(ref builder, builderOffset, StringEncoding.UTF8.GetMaxByteCount(codePointStringOffet));
-                    builderOffset += StringEncoding.UTF8.GetBytes(codePointStringBuffer, 0, codePointStringOffet, builder, builderOffset);
-                    codePointStringOffet = 0;
-                }
+                if (builder == null)
+                    builder = StringBuilderCache.GetBuffer();
 
-                var copyCount = offset - from - 1;
-                BinaryUtil.EnsureCapacity(ref builder, builderOffset, copyCount);
-                Buffer.BlockCopy(bytes, from, builder, builderOffset, copyCount);
-                builderOffset += copyCount;
+                if (codePointStringOffset != 0)
+                {
+                    BinaryUtil.EnsureCapacity(ref builder, builderOffset, StringEncoding.UTF8.GetMaxByteCount(codePointStringOffset));
+                    builderOffset += StringEncoding.UTF8.GetBytes(codePointStringBuffer, 0, codePointStringOffset, builder, builderOffset);
+                    codePointStringOffset = 0;
+                }
+                int literalCount = offset - from - 1; // exclude the closing quote
+                BinaryUtil.EnsureCapacity(ref builder, builderOffset, literalCount);
+                Buffer.BlockCopy(bytes, from, builder, builderOffset, literalCount);
+                builderOffset += literalCount;
 
                 resultBytes = builder;
                 resultOffset = 0;
                 resultLength = builderOffset;
             }
         }
+
 
 #if NETSTANDARD
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
